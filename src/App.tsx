@@ -20,6 +20,33 @@ const TELEGRAM_POLL_INTERVAL = 5000;
 const GEO_PERMISSION_DENIED = 1;
 const GEO_POSITION_UNAVAILABLE = 2;
 const GEO_TIMEOUT = 3;
+const DEFAULT_MARKER = {
+  name: "Checkpoint",
+  lat: 51.131849,
+  lng: 71.381401,
+  radius: 20,
+};
+const EARTH_RADIUS_METERS = 6_371_000;
+
+const toRadians = (value: number) => (value * Math.PI) / 180;
+
+const getDistanceInMeters = (
+  lat1: number,
+  lng1: number,
+  lat2: number,
+  lng2: number
+) => {
+  const dLat = toRadians(lat2 - lat1);
+  const dLng = toRadians(lng2 - lng1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRadians(lat1)) *
+      Math.cos(toRadians(lat2)) *
+      Math.sin(dLng / 2) *
+      Math.sin(dLng / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return EARTH_RADIUS_METERS * c;
+};
 
 type LocationPreset = {
   id: string;
@@ -73,6 +100,10 @@ function App() {
   const lastGpsPositionRef = useRef<Position | null>(null);
   const selectedLocationRef = useRef<string>(LOCATION_PRESETS[0].id);
   const locationSourceRef = useRef<"telegram" | "navigator" | "none">("none");
+  const defaultMarkerLayersRef = useRef<{
+    marker: L.Marker | null;
+    circle: L.Circle | null;
+  }>({ marker: null, circle: null });
 
   const [statusMessage, setStatusMessage] = useState("Requesting location…");
   const [position, setPosition] = useState<Position | null>(null);
@@ -82,6 +113,10 @@ function App() {
   );
   const [draftLat, setDraftLat] = useState<string>("");
   const [draftLng, setDraftLng] = useState<string>("");
+  const [insideDefaultMarker, setInsideDefaultMarker] = useState(false);
+  const [defaultMarkerDistance, setDefaultMarkerDistance] = useState<
+    number | null
+  >(null);
 
   modeRef.current = mode;
   selectedLocationRef.current = selectedLocationId;
@@ -159,7 +194,10 @@ function App() {
 
       lastGpsPositionRef.current = nextPosition;
 
-      if (modeRef.current === "gps" && selectedLocationRef.current === "current") {
+      if (
+        modeRef.current === "gps" &&
+        selectedLocationRef.current === "current"
+      ) {
         setDraftLat(lat.toFixed(6));
         setDraftLng(lng.toFixed(6));
       }
@@ -171,6 +209,15 @@ function App() {
       setPosition(nextPosition);
       setStatusMessage("Tracking your position");
       updateMapElements(lat, lng, normalizedAccuracy);
+
+      const distance = getDistanceInMeters(
+        lat,
+        lng,
+        DEFAULT_MARKER.lat,
+        DEFAULT_MARKER.lng
+      );
+      setDefaultMarkerDistance(distance);
+      setInsideDefaultMarker(distance <= DEFAULT_MARKER.radius);
     },
     [setDraftLat, setDraftLng, setPosition, setStatusMessage, updateMapElements]
   );
@@ -236,9 +283,18 @@ function App() {
 
       centeredRef.current = false;
       const accuracy = DEFAULT_ACCURACY;
-      setPosition({ lat, lng, accuracy });
+      const nextPosition = { lat, lng, accuracy };
+      setPosition(nextPosition);
       setStatusMessage(label ? `Simulating: ${label}` : "Simulating location");
       updateMapElements(lat, lng, accuracy);
+      const distance = getDistanceInMeters(
+        lat,
+        lng,
+        DEFAULT_MARKER.lat,
+        DEFAULT_MARKER.lng
+      );
+      setDefaultMarkerDistance(distance);
+      setInsideDefaultMarker(distance <= DEFAULT_MARKER.radius);
     },
     [updateMapElements]
   );
@@ -266,6 +322,31 @@ function App() {
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
       attribution: "&copy; OpenStreetMap contributors",
     }).addTo(mapRef.current);
+
+    const marker = L.marker([DEFAULT_MARKER.lat, DEFAULT_MARKER.lng], {
+      title: DEFAULT_MARKER.name,
+    }).bindTooltip(DEFAULT_MARKER.name, {
+      permanent: true,
+      direction: "top",
+      offset: L.point(0, -18),
+    });
+
+    marker.addTo(mapRef.current);
+
+    const circle = L.circle([DEFAULT_MARKER.lat, DEFAULT_MARKER.lng], {
+      radius: DEFAULT_MARKER.radius,
+      color: "#f97316",
+      weight: 2,
+      opacity: 0.9,
+      fillColor: "#fb923c",
+      fillOpacity: 0.15,
+      dashArray: "6 6",
+    }).addTo(mapRef.current);
+
+    defaultMarkerLayersRef.current = {
+      marker,
+      circle,
+    };
 
     const cleanupCallbacks: Array<() => void> = [];
 
@@ -339,7 +420,7 @@ function App() {
             handleLocationSuccess(latitude, longitude, accuracy);
           } else {
             handleLocationError(
-              new Error("Invalid location data received from Telegram."),
+              new Error("Invalid location data received from Telegram.")
             );
           }
         } catch (error) {
@@ -353,7 +434,7 @@ function App() {
           if (!controller.stopped) {
             controller.timerId = window.setTimeout(
               poll,
-              TELEGRAM_POLL_INTERVAL,
+              TELEGRAM_POLL_INTERVAL
             );
           }
         }
@@ -385,7 +466,7 @@ function App() {
           enableHighAccuracy: true,
           maximumAge: 1000,
           timeout: 10000,
-        },
+        }
       );
 
       watchIdRef.current = watchId;
@@ -418,6 +499,10 @@ function App() {
       });
 
       disposeSdk?.();
+
+      defaultMarkerLayersRef.current.marker?.remove();
+      defaultMarkerLayersRef.current.circle?.remove();
+      defaultMarkerLayersRef.current = { marker: null, circle: null };
 
       mapRef.current?.remove();
       mapRef.current = null;
@@ -545,6 +630,12 @@ function App() {
         )}
         {position && (
           <span className="accuracy">±{Math.round(position.accuracy)} m</span>
+        )}
+        {insideDefaultMarker && defaultMarkerDistance !== null && (
+          <span className="default-marker-alert">
+            Near {DEFAULT_MARKER.name} (
+            {Math.max(0, Math.round(defaultMarkerDistance))} m)
+          </span>
         )}
       </div>
 
